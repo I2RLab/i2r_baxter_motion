@@ -1,0 +1,244 @@
+/***************************************************************************
+ *                                                                         *
+ *                                 NMPC                                    *
+ *                         www.nonlinearmpc.com                            *
+ *                                                                         *
+ * Author:                                                                *
+ *   Juergen Pannek <juergen.pannek@googlemail.com>                        *
+ *                                                                         *
+ ***************************************************************************/
+
+/**
+ @file
+ @modified by Behzad Sadrfaridpour <bsadrfa@g.clemson.edu>
+ */
+
+#include <iostream>
+#include <cmath>
+#include <iomanip>
+#include <cstdio>
+#include <unistd.h>
+#include <cstdlib>
+#include <vector>
+#include "model_physical.h"
+
+#include <yane.h>
+#include <yane/sqpfortran.h>
+
+#include <ros/ros.h>
+#include <std_msgs/Float64.h>
+#include <geometry_msgs/Twist.h>
+#include <geometry_msgs/Vector3.h>
+#include <i2r_tools/Human.h>
+#include <i2r_tools/TrustData.h>
+#include <i2r_tools/RobotData.h>
+#include <i2r_tools/TrustMsg.h>
+
+#define HORIZON 10
+#define H_NEW 0.1//sample time
+#define INF 1.0E19
+//#define HORIZONSHIFT 100
+#define HORIZONSHIFT 1
+#define PRECEDESTEPS 1
+
+using namespace yane::MPC;
+using namespace yane::SqpFortran;
+using namespace yane::Utils;
+using namespace yane::I2R;
+using namespace std;
+
+yane::Model::Model * model;
+TrustModel *modelspecify;
+yane::Model::Simulator * simulator;
+OdeManager *odemanager;
+yane::MinProg::NLP * sqp;
+SqpFortran *sqpspecify;
+MPC *mpc;
+double robot_status;
+double sh, sr, ph, pr, trust;
+const double delay_len = 10;
+vector<double> u_sequence(delay_len);
+
+
+void updateHuman(const i2r_tools::Human & data)
+{
+	modelspecify->updateHumanStates(data.x0, data.x1, data.x2, data.x3, data.x4, 
+		data.xd0, data.xd1, data.xd2, data.xd3, data.xd4,
+		data.y0, data.y1, data.y2, data.y3, data.y4,
+		data.yd0, data.yd1, data.yd2, data.yd3, data.yd4,
+		data.sh0, data.dir_sgn, 
+		data.tx0, data.tx1, data.tx2, data.tx3, data.tx4, 
+		data.tx5, data.tx6, data.tx7, data.tx8, 
+		data.ty0, data.ty1, data.ty2, data.ty3, data.ty4, 
+		data.ty5, data.ty6, data.ty7, data.ty8,
+		data.sh, data.xi, data.yi);
+	sh = data.sh;
+}
+
+void updateRobot(const i2r_tools::RobotData& data)
+{
+	//x: s_r
+	//y: robot_status
+	modelspecify->updateRobotStates(data.sr, data.status, data.grad, data.lr);
+	robot_status = data.status;
+	sr = data.sr;
+}
+
+void updateTrust(const i2r_tools::TrustData& data)
+{
+    std::vector<double> pr_data, ph_data;
+    pr_data = data.pr_data;
+    ph_data = data.ph_data;
+	modelspecify->updateTrustStates(data.trust, pr_data, ph_data, data.pr, data.ph);
+	trust = data.trust;
+	pr = data.pr;
+	ph = data.ph;
+}
+
+int main(int argc, char *argv[])
+{
+	robot_status = 1;
+	ros::init(argc, argv, "solver_Trust");
+	ros::NodeHandle node;
+	int loop_frequency = 20;
+	ros::Rate loop_rate(loop_frequency);
+	double *x, *t, *u, *nextControls, *nextTimesteps;
+
+	model = new TrustModel();
+	modelspecify = ((TrustModel *) model);
+	simulator = new yane::Model::Simulator(model);
+
+	odemanager = new CacheOdeManager();
+	sqp = new SqpFortran();
+
+	sqpspecify = ((SqpFortran *) sqp);
+	//sqpspecify->setAccuracy(1E-6);
+	sqpspecify->setAccuracy(1E-4);
+	sqpspecify->setMaxFun(20);	//Maximal number of function evaluations 
+	sqpspecify->setMaxIterations(1000);
+	sqpspecify->setLineSearchTol(0.1);
+
+	mpc = new MPC(INF);
+	mpc->reset(odemanager, sqp, model, HORIZON, PRECEDESTEPS);
+
+	mpc->allocateMemory(t, u);
+	mpc->generateTimeGrid(t, 0.0, H_NEW);
+
+	mpc->initCalc(t, u);
+	mpc->setConfigShiftHorizon(STANDARD);
+
+	ros::Subscriber robot_sub = node.subscribe("/trust/robot_states", 10, updateRobot);
+	ros::Subscriber trust_sub = node.subscribe("/trust/trust", 10, updateTrust);
+	ros::Subscriber human_sub = node.subscribe("/trust/human_states", 10, updateHuman);
+	ros::Publisher ur_pub = node.advertise<std_msgs::Float64>("/trust/ur",10);
+	ros::Publisher trust_states_pub = node.advertise<geometry_msgs::Vector3>("/trust/trust_states",10);
+	ros::Publisher debug_pub = node.advertise<i2r_tools::TrustMsg>("/trust/debug_solver",1);
+	std_msgs::Float64 ur;
+	geometry_msgs::Vector3 trust_states;
+	i2r_tools::TrustMsg debug_states;
+	OptimalDiff::calc();
+	Exception::enableDebugMessage(true);
+
+	x = new double[model->dimensionState()];
+	memset(x, 0, model->dimensionState());
+	int dState = model->dimensionState();
+
+	nextControls = new double[model->dimensionControl() * HORIZONSHIFT];
+	nextTimesteps = new double[HORIZONSHIFT + 1];
+
+//	cout << "  NMPC started - Solver Physical" << endl;
+//	cout << "=============================================" << endl;
+	cout << "    sr,     sh,  u_pre,     pr,     ph,  trust,      u,  warning " << endl;
+//	cout << "   u_pre  u     time" << endl;
+	cout << "=============================================" << endl;
+    for (int j=0; j<delay_len; j++)
+	{
+	  u_sequence[j]=0.5;
+	}
+    ur.data = u_sequence[delay_len-1];
+    modelspecify->updateControlStates(ur.data);
+	//simulates the system response in 10 seconds
+	bool is_warning;
+	double u_pre = 0.5;
+	while (ros::ok()) {
+	  if (abs(robot_status-2)>0.01) 
+	  { 	//motion
+	    is_warning = false;
+
+		RTClock timer;
+		try {
+//			cout <<setw(10) << sh << setw(8) << sr << setw(6) << ph << setw(6) << pr << setw(6) << trust << setw(6);
+//			cout <<setw(10) << u_p;
+            modelspecify->getStates(debug_states);
+			mpc->calc(x);
+//            debug_states.x = x[9];
+//            debug_states.xdot = x[10];
+//            debug_states.y = ur.data;
+		}
+		catch(yane::MinProg::SolverWarning e) {
+//			cout << "<No solution 1> " << endl;
+            cout << "       , w1, " << endl;// <<  e.what() << endl;
+//			ur.data = -1.0;
+			is_warning = true;
+//			cout << e.what() << endl;
+		}
+		double duration = timer.elapsedSeconds() * 1000.0;//???
+		try {
+			mpc->shiftHorizon(nextControls, nextTimesteps, HORIZONSHIFT, x, H_NEW);
+//			ur.data = nextControls[0];
+            for (int j = delay_len; j>0; j--)
+            {
+                u_sequence[j] =u_sequence[j-1];
+            }
+            u_sequence[0] = nextControls[0];
+            ur.data = u_sequence[delay_len-1];
+            }
+		catch(yane::MinProg::SolverWarning e) {
+//			cout << "<No solution 2>" << endl;
+            cout << "     w2, " << endl <<  e.what() << endl;
+//            cout << debug_states.sr << ": no solution 2, " <<  e.what() << endl;
+//			cout << e.what() << endl;
+//			ur.data = -1.0;
+			is_warning = true;
+		}
+		// publish the control output to be subscribed by robot (path_#.py)
+//		if (ur.data < 0.05 && fmod(sr, 1) < 0.95)
+//		{
+//			ur.data = 0.00;
+//		}
+        if (ur.data >= 0.0 && !is_warning)
+        {
+            modelspecify->updateControlStates(ur.data);
+            debug_states.u = ur.data;
+            u_pre = ur.data;
+//            debug_states.trust = ur.data;
+//            debug_states.pr = abs(ur.data - debug_states.u);
+    		ur_pub.publish(ur);
+            cout << fixed <<setw(7)<<setprecision(2)<< ur.data << endl;
+    		debug_pub.publish(debug_states);
+    	}
+    	else
+    	{
+//            debug_states.ydot = -2;
+            modelspecify->updateControlStates(u_pre);
+            debug_pub.publish(debug_states);
+
+    	}
+//		cout <<"solver" <<setw(10) << ur.data << setw(6) << duration << setw(6) <<endl;
+
+	  }
+	  ros::spinOnce();
+	  loop_rate.sleep();
+	}
+	delete mpc;
+	delete sqp;
+	delete odemanager;
+	delete simulator;
+	delete model;
+	delete[]x;
+	delete[]t;
+	delete[]u;
+	delete[]nextControls;
+	delete[]nextTimesteps;
+	return 0;
+}

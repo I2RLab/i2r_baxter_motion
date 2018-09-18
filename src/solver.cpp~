@@ -1,0 +1,264 @@
+/***************************************************************************
+ *                                                                         *
+ *                                 NMPC                                    *
+ *                         www.nonlinearmpc.com                            *
+ *                                                                         *
+ * Author:                                                                *
+ *   Juergen Pannek <juergen.pannek@googlemail.com>                        *
+ *                                                                         *
+ ***************************************************************************/
+
+/**
+ @file
+ @modified by Behzad Sadrfaridpour <bsadrfa@g.clemson.edu>
+ */
+
+#include <iostream>
+#include <cmath>
+#include <iomanip>
+#include <cstdio>
+#include <unistd.h>
+#include <cstdlib>
+#include <vector>
+#include "model.h"
+
+#include <yane.h>
+#include <yane/sqpfortran.h>
+
+#include <ros/ros.h>
+#include <std_msgs/Float64.h>
+#include <geometry_msgs/Twist.h>
+#include <geometry_msgs/Vector3.h>
+#include <i2r_tools/Human.h>
+#include <i2r_tools/TrustData.h>
+#include <i2r_tools/RobotData.h>
+#include <i2r_tools/TrustMsg.h>
+
+const int HORIZON = 5;
+#define H_NEW 0.1//sample time
+#define INF 1.0E19
+//#define HORIZONSHIFT 100
+#define HORIZONSHIFT 1
+#define PRECEDESTEPS 1
+
+using namespace yane::MPC;
+using namespace yane::SqpFortran;
+using namespace yane::Utils;
+using namespace yane::I2R;
+using namespace std;
+
+yane::Model::Model * model;
+TrustModel *modelspecify;
+//yane::Model::Simulator * simulator;
+OdeManager *odemanager;
+yane::MinProg::NLP * sqp;
+SqpFortran *sqpspecify;
+MPC *mpc;
+double robot_status;
+double sh, sr, ph, pr, trust;
+
+
+void updateHuman(const i2r_tools::Human & data)
+{
+	modelspecify->updateHumanStates(data.x0, data.x1, data.x2, data.x3, data.x4, 
+		data.xd0, data.xd1, data.xd2, data.xd3, data.xd4,
+		data.y0, data.y1, data.y2, data.y3, data.y4,
+		data.yd0, data.yd1, data.yd2, data.yd3, data.yd4,
+		data.sh0, data.dir_sgn, 
+		data.tx0, data.tx1, data.tx2, data.tx3, data.tx4, 
+		data.tx5, data.tx6, data.tx7, data.tx8, 
+		data.ty0, data.ty1, data.ty2, data.ty3, data.ty4, 
+		data.ty5, data.ty6, data.ty7, data.ty8,
+		data.sh, data.xi, data.yi);
+	sh = data.sh;
+}
+
+void updateRobot(const i2r_tools::RobotData& data)
+{
+	//x: s_r
+	//y: robot_status
+	modelspecify->updateRobotStates(data.sr, data.status, data.grad, data.lr);
+	robot_status = data.status;
+	sr = data.sr;
+}
+
+void updateTrust(const i2r_tools::TrustData& data)
+{
+    std::vector<double> pr_data, ph_data;
+    pr_data = data.pr_data;
+    ph_data = data.ph_data;
+	modelspecify->updateTrustStates(data.trust, pr_data, ph_data, data.pr, data.ph);
+	trust = data.trust;
+	pr = data.pr;
+	ph = data.ph;
+}
+
+int main(int argc, char *argv[])
+{
+	robot_status = 1;
+	ros::init(argc, argv, "solver_int");
+	ros::NodeHandle node;
+	int loop_frequency = 20;
+	ros::Rate loop_rate(loop_frequency);
+	double *x, *t, *u, *nextControls, *nextTimesteps;
+
+	model = new TrustModel();
+	modelspecify = ((TrustModel *) model);
+//	simulator = new yane::Model::Simulator(model);
+
+//	odemanager = new SimpleOdeManager();
+	odemanager = new CacheOdeManager();
+	sqp = new SqpFortran();
+
+	sqpspecify = ((SqpFortran *) sqp);
+	//sqpspecify->setAccuracy(1E-6);
+	sqpspecify->setAccuracy(1E-4);
+//	sqpspecify->setMaxFun(20);	//Maximal number of function evaluations
+	sqpspecify->setMaxFun(50);	//Maximal number of function evaluations
+	sqpspecify->setMaxIterations(1000);
+	sqpspecify->setLineSearchTol(0.1);
+	sqpspecify->setLineSearchTol(0.05);
+
+	mpc = new MPC(INF);
+	mpc->reset(odemanager, sqp, model, HORIZON, PRECEDESTEPS);
+
+	mpc->allocateMemory(t, u);
+	mpc->generateTimeGrid(t, 0.0, H_NEW);
+    for ( int i = 0; i < HORIZON; i++ )
+    {
+        model->getDefaultControl ( &u[i * model->dimensionControl() ] );
+    }
+	mpc->initCalc(t, u);
+	cout << "initial u is:" << u[0] <<endl;
+	mpc->setConfigShiftHorizon(STANDARD);
+
+	ros::Subscriber robot_sub = node.subscribe("/trust/robot_states", 10, updateRobot);
+	ros::Subscriber trust_sub = node.subscribe("/trust/trust", 10, updateTrust);
+	ros::Subscriber human_sub = node.subscribe("/trust/human_states", 10, updateHuman);
+	ros::Publisher ur_pub = node.advertise<std_msgs::Float64>("/trust/ur",10);
+	ros::Publisher trust_states_pub = node.advertise<geometry_msgs::Vector3>("/trust/trust_states",10);
+	ros::Publisher debug_pub = node.advertise<i2r_tools::TrustMsg>("/trust/debug_solver",1);
+	// Solver Weighting Parameters
+	double q, r, w, z, du_max;
+    node.param("Q", q, 50.);
+    node.param("R", r, 50.);
+    node.param("W", w, 50.);
+    node.param("Z", z, 20.);
+    node.param("du_max", du_max, 0.35);
+    modelspecify->setParams(q, r, w, z, du_max, HORIZON);
+
+	std_msgs::Float64 ur;
+	geometry_msgs::Vector3 trust_states;
+	i2r_tools::TrustMsg debug_states;
+	OptimalDiff::calc();
+	Exception::enableDebugMessage(true);
+
+	x = new double[model->dimensionState()];
+	memset(x, 0, model->dimensionState());
+	int dState = model->dimensionState();
+
+	nextControls = new double[model->dimensionControl() * HORIZONSHIFT];
+	nextTimesteps = new double[HORIZONSHIFT + 1];
+
+//	cout << "  NMPC started - Solver Physical" << endl;
+//	cout << "=============================================" << endl;
+	cout << "    sh,     sr,     pr,     ph,  trust,  u_pre,      u,  warning " << endl;
+//	cout << "   u_pre  u     time" << endl;
+	cout << "=============================================" << endl;
+    ur.data = 0.5;
+    modelspecify->updateControlStates(ur.data);
+	//simulates the system response in 10 seconds
+//	modelspecify->setNodeHandler(node);
+	bool is_warning;
+	double u_pre = 0.5;
+	int num_err;
+	while (ros::ok()) {
+	  if (abs(robot_status-2)>0.01)
+	  { 	//motion
+//	    is_warning = false;
+	    is_warning = true;
+        num_err = 0;
+		RTClock timer;
+		while(is_warning && num_err < 4){
+            try {
+    //			cout <<setw(10) << sh << setw(8) << sr << setw(6) << ph << setw(6) << pr << setw(6) << trust << setw(6);
+    //			cout <<setw(10) << u_p;
+                is_warning = false;
+                modelspecify->getStates(debug_states);
+                modelspecify->setEpsilon(num_err*0.1);
+//    			cout <<endl<<"before x" <<setw(10) << x[0]  << setw(8) << " , " << x[1] << setw(6) << " , "<< x[2] << " , " << setw(6) << x[3] << setw(6) << " , " << x[4] << setw(6) <<endl;
+//                modelspecify->UpdateX(x);
+                mpc->calc(x);
+//                cout <<endl<<"after x" <<setw(10) << x[0]  << setw(8) << " , " << x[1] << setw(6) << " , "<< x[2] << " , " << setw(6) << x[3] << setw(6) << " , " << x[4] << setw(6);
+//                cout <<setw(10) << x[5]  << setw(8) << " , " << x[6] << setw(6) << " , "<< x[7] << " , " << setw(6) << x[8] << setw(6) << " , " << x[9] << setw(6) <<endl;
+    //            debug_states.x = x[9];
+    //            debug_states.xdot = x[10];
+    //            debug_states.y = ur.data;
+            }
+            catch(yane::MinProg::SolverWarning e) {
+    //			cout << "<No solution 1> " << endl;
+                cout << "   , warning1 " <<  e.what() << endl;
+    //			ur.data = -1.0;
+                is_warning = true;
+                num_err++;
+    //			cout << e.what() << endl;
+            }
+       }
+		double duration = timer.elapsedSeconds() * 1000.0;//???
+		try {
+			mpc->shiftHorizon(nextControls, nextTimesteps, HORIZONSHIFT, x, H_NEW);
+			ur.data = nextControls[0];
+            cout << "  , " << ur.data << endl;// <<  e.what() << endl;
+		}
+		catch(yane::MinProg::SolverWarning e) {
+//			cout << "<No solution 2>" << endl;
+            cout << "    w2, " << endl <<  e.what() << endl;
+//            cout << debug_states.sr << ": no solution 2, " <<  e.what() << endl;
+//			cout << e.what() << endl;
+//			ur.data = -1.0;
+			is_warning = true;
+		}
+		// publish the control output to be subscribed by robot (path_#.py)
+//		if (ur.data < 0.05 && fmod(sr, 1) < 0.95)
+//		{
+//			ur.data = 0.00;
+//		}
+        if (ur.data >= 0.0 && !is_warning)
+        {
+            modelspecify->updateControlStates(ur.data);
+            debug_states.u = ur.data;
+            u_pre = ur.data;
+            u_pre = (u_pre < 0.3) ? 0.3 : u_pre;
+//            debug_states.trust = ur.data;
+//            debug_states.pr = abs(ur.data - debug_states.u);
+    		ur_pub.publish(ur);
+            cout << fixed <<setw(7)<<setprecision(2)<< ur.data << endl;
+    		debug_pub.publish(debug_states);
+    	}
+    	else
+    	{
+//            debug_states.ydot = -2;
+            modelspecify->updateControlStates(u_pre);
+            ur.data = u_pre;
+            ur_pub.publish(ur);
+            debug_pub.publish(debug_states);
+
+    	}
+//		cout <<"solver" <<setw(10) << ur.data << setw(6) << duration << setw(6) <<endl;
+
+	  }
+	  ros::spinOnce();
+	  loop_rate.sleep();
+	}
+	delete mpc;
+	delete sqp;
+	delete odemanager;
+//	delete simulator;
+	delete model;
+	delete[]x;
+	delete[]t;
+	delete[]u;
+	delete[]nextControls;
+	delete[]nextTimesteps;
+	return 0;
+}

@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<launch>
+  <param name="Q" value="100.0" type="double"/>
+  <param name="W" value="100.0" type="double"/>
+  <param name="R" value="100.0" type="double"/>
+  <param name="Z" value="100.0" type="double"/>
+  <param name="du_max" value= ".25" type="double"/>
+  <arg name="log" default="S_XX" />
+  <node name="phasespace" pkg="phase_space_node" type="phasespacenode"/>
+  <node name="tracker"    pkg="i2r_baxter_motion" type="hand_tracker">
+    <param name="led_name" value="/LED9" />
+  </node>
+  <node name="baxter"     pkg="i2r_baxter_motion" type="exp.py">
+    <param name="emotion" value="False"/>
+    <param name="trust_path" value="True" />
+  </node>
+  <node name="trust"      pkg="i2r_baxter_motion" type="trust_sim.py">
+    <param name="log_file" value="$(arg log)_case3.csv"/>
+  </node>
+  <node name="solver"     pkg="i2r_baxter_motion" type="mpc_solver"/>
+  <node name="change_speed"      pkg="i2r_baxter_motion" type="change_speed.py"/>
+  <node name="transparency"     pkg="i2r_baxter_motion" type="monitor_trust.py">
+    <param name="extra_trust_show" value="True"/>
+    <param name="trust_show" value="True"/>
+    <param name="emotion" value="False"/>
+    <param name="log_file" value="$(arg log).txt"/>
+  </node>
+</launch>

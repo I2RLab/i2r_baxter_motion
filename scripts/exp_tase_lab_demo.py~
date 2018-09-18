@@ -1,0 +1,248 @@
+#!/usr/bin/env python
+__author__ = 'behzad'
+import sys
+import threading
+from bisect import bisect
+from copy import copy
+from os import path
+import actionlib
+from control_msgs.msg import (
+    FollowJointTrajectoryAction,
+    FollowJointTrajectoryGoal,
+)
+from trajectory_msgs.msg import (
+    JointTrajectoryPoint,
+)
+import argparse
+import operator
+import numpy as np
+import csv
+import baxter_pykdl
+from math import atan, asin
+from std_msgs.msg import (
+    UInt16,
+    Float64,
+    UInt8,
+    Bool,
+)
+from geometry_msgs.msg import (
+    Vector3
+)
+import rospy
+import baxter_interface
+import baxter_external_devices
+from baxter_interface import CHECK_VERSION
+import matplotlib.pyplot as plt
+import random
+import i2r.color as i2rcv
+import i2r.camera as i2rcamera
+import tf
+from cv_bridge import CvBridge, CvBridgeError
+from sensor_msgs.msg import Image
+import cv2
+from i2r_move.msg import (
+    TrustData,
+    RobotData,
+    Human
+)
+import player_tase
+
+def main_debug():
+    print("Initializing node... ")
+    rospy.init_node("debug_main")
+    print("Getting robot state... ")
+    rs = baxter_interface.RobotEnable(CHECK_VERSION)
+    print("Enabling robot... ")
+    # filename= '/home/baxter/ros_ws/src/i2r_tools/scripts/tase/tase_pick_pos_2.csv'
+    # filename= '/home/baxter/ros_ws/src/i2r_tools/scripts/tase/pick_pos_shelf.csv'
+    # filename= '/home/baxter/ros_ws/src/i2r_tools/scripts/tase/place_pos_4.csv'
+    filename= '/home/baxter/ros_ws/src/i2r_tools/scripts/tase/pick_pos_6.csv'
+
+    mover = player_tase.PosPlayer(filename, 100, emotion = True)
+    mover.set_image('/home/baxter/ros_ws/src/i2r_tools/img/start.png')
+    rospy.on_shutdown(mover.stop)
+    mover.open_file(filename)
+    for i in range(2,3,1):
+        rospy.loginfo("point~" + str(i + 1))
+        mover.move_waypoint(i + 1)
+        cur= mover.joint_current()
+        print(cur)
+        mover.wait("wait for " + str(i + 1))
+
+def main_new_style():
+    """Experiment - Preliminary - Effective Case
+    """
+    epilog = """
+    Related examples:
+    exp_preliminary_pol.py.
+    """
+    arg_fmt = argparse.RawDescriptionHelpFormatter
+    parser = argparse.ArgumentParser(formatter_class=arg_fmt,
+                                     description=main.__doc__,
+                                     epilog=epilog)
+    required = parser.add_argument_group('required arguments')
+    parser.add_argument(
+        '-r', '--command_rate', type=int, default=100, metavar='COMRATE',
+        help
+        ='rate at which to send commands (default: 100)'
+    )
+    parser.add_argument(
+        '-p', '--polite', type=int, default=True, metavar='POLITE',
+        help='Enables the polite behavior of the robot (default: False)'
+    )
+    args = parser.parse_args(rospy.myargv()[1:])
+    print("Initializing node... ")
+    rospy.init_node("effective_exp")
+    print("Getting robot state... ")
+    rs = baxter_interface.RobotEnable(CHECK_VERSION)
+    print("Enabling robot... ")
+    rs.enable()
+    polite = args.polite
+    # polite=False #case 1
+    # polite=True #case 2
+
+    if polite:
+        filenames = ['p3_t1'] # and p2_t9 and p2_t10
+    else:
+        filenames = ['p1_t1',]
+    path_dir = '/home/baxter/ros_ws/src/i2r_tools/scripts/finishing_task/'
+    mover = player.PosPlayer(path_dir+filenames[0]+'.csv', args.command_rate)
+    rospy.on_shutdown(mover.stop)
+
+    print("Moving. Press Ctrl-C to stop.")
+    mover.set_image('/home/baxter/ros_ws/src/i2r_move/img/idle.png')
+
+    # debug = True
+    debug = False
+    for index, entry in enumerate(filenames):
+        rospy.loginfo(entry)
+        mover.open_file(path_dir+entry+'.csv')
+        mover.force_velocity(1.0)
+        if debug:
+            for i, tmp in enumerate(entry):
+                rospy.loginfo("point~"+str(i+1))
+                mover.move_waypoint(i+1)
+                mover.wait("wait for "+str(i+1))
+        else:
+            mover.move_joint_fast()
+
+    mover.move_to_pos(mover._joint_first, timeout=15)
+    rospy.loginfo("\nDone.")
+
+def main():
+    """player_tase: usage example
+
+    Reads a file for the position of the workspace (place position).
+    Uses the player_tase to picks a part from the bin of parts
+    and places it the shared workspace.
+
+    Run recorder_1.py first to create a recording file for
+    parts in the bin and a file for the position of the workspace.
+
+    For Human-Robot Interaction run a launch file instead of this.
+    """
+    epilog = """
+    Recorder:
+    recorder_1.py;
+    """
+    arg_fmt = argparse.RawDescriptionHelpFormatter
+    parser = argparse.ArgumentParser(formatter_class=arg_fmt,
+                                     description=main.__doc__,
+                                     epilog=epilog)
+    required = parser.add_argument_group('required arguments')
+    required.add_argument(
+        '-f', '--filename', metavar='PATH', default='/home/baxter/ros_ws/src/i2r_tools/scripts/tase/place_pos_5.csv',
+        help='path to input file'
+    )
+    parser.add_argument(
+        '-r', '--command_rate', type=int, default=100, metavar='COMRATE',
+        help='rate at which to send commands (default: 100)'
+    )
+    parser.add_argument(
+        '-e', '--emotion', type=bool, default=False, metavar='EMOTION',
+        help='whether or not the robot displays emotion (default: False)'
+    )
+    parser.add_argument(
+        '-t', '--trust_path', type=bool, default=False, metavar='TRUST_PATH',
+        help='whether or not the robot selects the path based on trust (default: False)'
+    )
+    args = parser.parse_args(rospy.myargv()[1:])
+
+    print("Initializing node... ")
+    rospy.init_node("path_player")
+    print("Getting robot state... ")
+    rs = baxter_interface.RobotEnable(CHECK_VERSION)
+    print("Enabling robot... ")
+    rs.enable()
+    try:
+        emotion = rospy.get_param('~emotion')
+    except KeyError:
+        emotion = args.emotion
+    # emotion = True
+    try:
+        trust_path = rospy.get_param('~trust_path')
+    except KeyError:
+        trust_path = args.trust_path
+    # trust_path = True
+    mover = player_tase.PosPlayer(args.filename, args.command_rate, emotion)
+    mover.set_image('/home/baxter/ros_ws/src/i2r_tools/img/start.png')
+    rospy.on_shutdown(mover.stop)
+    print("\nMoving. Press Ctrl-C to stop.")
+
+    mover.read_pick_up_pos('/home/baxter/ros_ws/src/i2r_tools/scripts/tase/pick_pos_8.csv')
+    mover.move_to_pos(mover._joint_first, timeout=15)
+    # mover._path_pos_0 = 0.0
+    if trust_path or emotion:
+        trust_threshold = 0.75
+    else:
+        trust_threshold = 0.0
+    if not emotion:
+        mover.set_image('/home/baxter/ros_ws/src/i2r_tools/img/idle.png')
+    j=0
+    # while not rospy.is_shutdown() and j < 6:
+    while not rospy.is_shutdown() and j < 6:
+        j+=1
+        if trust_path and mover._trust_mean<trust_threshold:
+            mover.create_path_dir(mid_offset_vector = [-.05, 0, 0.05], mid_offset_knot=0.65, direction=1)
+        else:
+            # mover.create_path_dir(mid_offset_vector = [-.05, 0, 0.05], mid_offset_knot=0.65, direction=1)
+            mover.create_path_dir(axis=3, mid_offset=.05,direction=1)
+        mover.reset_trust()
+        # mover._path_pos_0 = 0.0
+        mover.set_status(1)
+        mover.move_tase(first_timeout=1)
+        mover._path_pos_0 += 0.25
+        mover._path.sr = mover._path_pos_0
+        # mover.wait('wait 0')
+        mover.set_status(2)
+        mover.pick_blob_pos()
+        if trust_path and  mover._trust_mean<trust_threshold:
+            mover.create_path_dir(mid_offset_vector = [-.05, 0, 0.05], mid_offset_knot=0.35, direction=0)
+        else:
+            # mover.create_path_dir(mid_offset_vector = [-.05, 0, 0.1], mid_offset_knot=0.35, direction=0)
+            mover.create_path_dir(axis=3, mid_offset=.05, direction=0)
+        mover.reset_trust()
+        mover.set_status(1)
+        mover.move_tase(first_timeout=1)
+        # mover.wait('wait 1')
+        # mover.set_status(3)
+        mover.set_status(2)
+        mover.place_blob_pos()
+        mover._path_pos_0 += 0.25
+        mover._path.sr = mover._path_pos_0
+        # mover.open_gripper()
+    mover.create_path_dir(3, mid_offset=.10,direction=1)
+    mover.set_status(1)
+    mover.move_tase(first_timeout=1)
+    mover._path_pos_0 += 0.5
+
+    print("\nDone.")
+
+
+if __name__ == '__main__':
+    debug=True
+    debug=False
+    if debug:
+        main_debug()
+    else:
+        main()

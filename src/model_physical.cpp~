@@ -1,0 +1,501 @@
+/***************************************************************************
+ *                                                                         *
+ * Human Trust Model                                                       *
+ *                                                                         *
+ * Authors:                                                                *
+ *   Behzad Sadr <bsadrfa@g.clemson.edu>                                   *
+ *                                                                         *
+ ***************************************************************************/
+
+/**
+ @file
+ @author Behzad Sadr <bsadrfa@g.clemson.edu>
+ */
+
+#include "model_physical.h"
+
+#include <yane/odesolve.h>
+#include <iostream>
+#include <cmath>
+#include <cstdlib>
+#include <geometry_msgs/Vector3.h>
+#include <vector>
+#include "spline.h"
+#include <fstream>
+#include <string>
+#include <iomanip>
+#include <i2r_tools/TrustMsg.h>
+
+
+
+using namespace std;
+
+#define PI 3.141592654
+#define INF 1.0E19
+#define epsilon 1E-6
+
+#define a_t 0.9
+#define b_t 0.05
+#define c_t 0.05
+#define w1 0.85
+#define w2 0.85
+#define v_h_max 1500  // [mm/s]
+#define Ts .10
+#define num_n 4
+#define num_m 4
+#define N_p 50
+
+const yane::Utils::Uuid yane::I2R::TrustModel::ID((const unsigned char *)("507df855-d1fd-4470-831d-92eaef4f71ce"));
+// 	Model (yane::OdeSolve::OdeSolveFirst *ode, yane::OdeSolve::OdeConfig *odeconf, 
+//	int dimension, int ctrl_dimension, int restrsize, int paramsize=0, int iparamsize=0, int networkrestrsize=0)
+//	setRestrictionSize (int restrsize)
+//	Function to set the number of restrictions. 
+yane::I2R::TrustModel::TrustModel() : yane::Model::Model(new yane::OdeSolve::RecurseSequence(), new yane::OdeSolve::OdeConfig(), 11, 1, 2, 11)
+{
+	setDoubleParameter(0, 1700.0);
+	setDoubleParameter(1, 0.0);
+	setDoubleParameter(2, 500.0);
+	setDoubleParameter(3, 0.0);
+	setDoubleParameter(4, 0.0);
+	setDoubleParameter(5, 0.0);
+	setDoubleParameter(6, 0.5);
+	setDoubleParameter(7, 0.5);
+	setDoubleParameter(8, 0.5);
+	setDoubleParameter(9, 0.5);
+	setDoubleParameter(10, 0.5);
+
+	odeConfig()->setTolerance(1E-7, 1E-7);
+
+	_state_lb[0] = -1E6;
+	_state_ub[0] = 1E6;
+	_state_lb[1] = -1E6;
+	_state_ub[1] = 1E6;
+	_state_lb[2] = -1E6;
+	_state_ub[2] = 1E6;
+	_state_lb[3] = -1E6;
+	_state_ub[3] = 1E6;
+	_state_lb[4] = 0.0;
+	_state_ub[4] = 1E3;
+	_state_lb[5] = 0.0;
+	_state_ub[5] = 1E3;
+	_state_lb[6] = -10.0;
+	_state_ub[6] = 10.0;
+	_state_lb[7] = -10.0;
+	_state_ub[7] = 10.0;
+	_state_lb[8] = -10.0;
+	_state_ub[8] = 10.0;
+	_state_lb[9] = -1.0;
+	_state_ub[9] = 1.0;
+	_state_lb[10] = -1.0;
+	_state_ub[10] = 1.0;
+
+	_control_lb[0] = 0.0;
+	_control_ub[0] = 1.00;
+
+    std::ifstream config_file("/home/baxter/ros_ws/src/i2r_tools/config.txt");
+    std::string str;
+    std::getline(config_file, str);
+    config_file >> pos_i.x >> pos_i.y >> pos_i.z;
+    config_file >> pos_f.x >> pos_f.y >> pos_f.z;
+    config_file.close();
+//    pos_i.x=1690;      pos_f.x=1550;
+//    pos_i.y=-470;      pos_f.y=-320;
+//    pos_i.z=910;        pos_f.z=820;
+
+	_xm = (pos_i.x+pos_f.x)/2;
+	_ym = (pos_i.y+pos_f.y)/2;
+	_range = (pow(pos_i.x-pos_f.x,2) + pow(pos_i.y-pos_f.y,2))*2;
+	dir_h[0]=pos_f.x-pos_i.x;	dir_h[1]=pos_f.y-pos_i.y;
+	len_h=sqrt(dir_h[0]*dir_h[0] + dir_h[1]*dir_h[1]);
+	dir_h[0]=dir_h[0]/len_h;	dir_h[1]=dir_h[1]/len_h;
+	len_h=len_h*2;
+	r_status_coef[0]=1.0;
+	r_status_coef[1]=0.0;
+	_sr = 0.0;	
+	_ph = 0.5;
+	_pr = 0.5;
+	_trust = 0.4;
+    _grad = 1;
+	_lr = 1;
+
+	_xh.resize(6);
+	_xh_dot.resize(6);
+	_yh.resize(6);
+	_yh_dot.resize(6);
+
+	_xh_org.resize(6);
+	_xh_dot_org.resize(6);
+	_yh_org.resize(6);
+	_yh_dot_org.resize(6);
+	for (int j=1; j<6; j++)
+	{
+	  _xh[j]=pos_i.x;
+	  _xh_dot[j]=0.0;
+	  _yh[j]=pos_i.y;
+	  _yh_dot[j]=0.0;
+	}
+	_sh = 0.0;
+	_xi=pos_i.x;
+	_yi=pos_i.y;
+	_sh0 = 0;
+	_dir_sgn = 1;
+	_tx.resize(10);
+	_ty.resize(10);
+	for (int j=1; j<10; j++)
+	{
+	  _tx[j]=0.0;
+	  _ty[j]=0.0;
+	}
+
+    _pr_data.resize(N_p);
+    _pr_data_org.resize(N_p);
+    _ph_data.resize(N_p);
+    _ph_data_org.resize(N_p);
+	for (int j=0; j<N_p; j++)
+	{
+	  _pr_data[j]=_pr;
+	  _pr_data_org[j]=_pr;
+	  _ph_data[j]=_ph;
+	  _ph_data_org[j]=_ph;
+	}
+
+
+	std::vector<double> Xref(13), Yref(13);
+//	Xref[0]=0.0; Xref[1]=0.16; Xref[2]=0.37; Xref[3]=0.5; Xref[4]=0.66; Xref[5]=0.87; Xref[6]=1.0;
+//	Yref[0]=0.0; Yref[1]=0.80; Yref[2]=0.45; Yref[3]=0.0; Yref[4]=0.80; Yref[5]=0.45; Yref[6]=0.0;
+	//sdr=[0 0; 0.16 0.2; 0.37 0.12; 0.5 0; 0.66 0.2; 0.87 0.12; 1 0];
+	Xref[0]=0.0; Xref[1]=0.16*.5; Xref[2]=0.37*.5; Xref[3]=0.5*.5; Xref[4]=0.66*.5; Xref[5]=0.87*.5; Xref[6]=1.0*.5;
+	             Xref[7]=0.5+0.16*.5; Xref[8]=0.5+0.37*.5; Xref[9]=0.5+0.5*.5; Xref[10]=0.5+0.66*.5; Xref[11]=0.5+0.87*.5; Xref[12]=1.0;
+	Yref[0]=0.0; Yref[1]=0.80; Yref[2]=0.45; Yref[3]=0.0; Yref[4]=0.80; Yref[5]=0.45; Yref[6]=0.0;
+	             Yref[7]=0.80; Yref[8]=0.45; Yref[9]=0.0; Yref[10]=0.80; Yref[11]=0.45; Yref[12]=0.0;
+
+	s_ref.set_points(Xref,Yref);    // it is required that Xref is already sorted
+}
+
+yane::I2R::TrustModel::~TrustModel()
+{
+	delete odeSolver();
+	delete odeConfig();
+}
+
+void yane::I2R::TrustModel::odeFunction(double t, double *x, double *u, double *dx)
+{
+	double s_diff, u_s_diff;
+	double dx_tmp[5] = {0, 0, 0, 0, 0};
+	double pr, ph;
+	for (int j=1; j<num_n+1; j++)
+	{
+	  dx_tmp[1] += _tx[j]*_xh_dot[j+1];
+	  dx_tmp[3] += _ty[j]*_yh_dot[j+1];
+	}
+	for (int j=1; j<num_m+2; j++)
+	{
+	  dx_tmp[1] += _tx[j+num_n]*_xh[j];  //vx
+	  dx_tmp[3] += _ty[j+num_n]*_yh[j];  //vy
+	}
+	dx[1]=dx_tmp[1];
+	dx[3]=dx_tmp[3];
+	dx[0]=dx_tmp[1]*Ts+_xh[1];
+	dx[2]=dx_tmp[1]*Ts+_yh[1];
+//	S_H
+
+        dx[4] = round((_dir_sgn*(dir_h[0]*(x[0]-_xi) + dir_h[1]*(x[2]-_yi))/len_h+_sh0)*100.0)/100.0;
+//	dx[4] = x[4];
+
+//	cout << counter << ": " << x[4] << " >> " << dx[4] << endl;
+//      dx[4] = _dir_sgn*(dir_h[0]*(dx[0]-_xi)+dir_h[1]*(dx[2]-_yi))/len_h+_sh0;
+//	if (dx[4] > 1.0) 
+//	{
+//	    dx[4] = 1.0;
+//	} 
+//	else if (dx[4] < 0.0) 
+//	{
+//	    dx[4] = 0.0;
+//	}
+	if ((pow(x[0]-_xm, 2)+pow(x[1]-_ym, 2))>_range)
+	{
+	    dx[4] = x[4];
+//	    dx[4] = 0.0;
+	}		
+//	S_R
+//	dx[5] = r_status_coef[0]*(x[5]+u[0]*Ts);//+r_status_coef[1];
+//  r = 2
+//  add l in robot states
+	dx[5] = x[5]+u[0]*Ts/(2*2*_lr*_grad);  //note
+
+//	cout << counter << ": " << x[5] << " -> " << dx[5] << "\t";
+//	P_H
+	s_diff = x[5]-x[4];
+	if (s_diff > 1.0) {
+	    s_diff = 1;
+	    u_s_diff = 1; 
+	} else if (s_diff > 0.0) {
+	    u_s_diff = 1;
+	} else {
+	    u_s_diff = 0;
+	    s_diff = s_diff*-1;
+	}
+//	u_s_diff = ((s_diff>0) ? 1 : 0);
+//	s_diff = abs(s_diff);
+//	dx[6] = 1-(1-w1)*abs(_dir_sgn*(dir_h[0]*x[1]+dir_h[1]*x[3])/v_h_max-v_h_ref(x[4]))-w1*s_diff*u_s_diff;
+	ph = 1-(1-w1)*abs(abs(dir_h[0]*x[1]+dir_h[1]*x[3])/v_h_max-v_h_ref(x[4]))-w1*s_diff*u_s_diff;
+
+	double sum_p;
+	sum_p = 0;
+	for (int j = N_p; j>0; j--)
+	{
+	    _ph_data[j] =_ph_data[j-1];
+	    sum_p += _ph_data[j];
+	}
+	_ph_data[0] = ph;
+	dx[6] = (sum_p+ph)/N_p;
+//	dx[6] = 1-(1-w1)*abs(1-_dir_sgn*(dir_h[0]*x[1]+dir_h[1]*x[3])/v_h_max)-w1*s_diff*u_s_diff;
+
+//	P_R
+	pr = 1-(1-w2)*(u[0]-v_r_ref(x[5]))-w2*abs(s_diff);
+
+	sum_p = 0;
+	for (int j = N_p; j>0; j--)
+	{
+	    _pr_data[j] =_pr_data[j-1];
+	    sum_p += _pr_data[j];
+	}
+	_pr_data[0] = pr;
+	dx[7] = (sum_p+pr)/N_p;
+
+	if (counter==1)
+	{
+	    _u_pre=0;
+//	  cout << "<ph: " << _dir_sgn*(dir_h[0]*x[1]+dir_h[1]*x[3])/v_h_max << " vs " << v_h_ref(x[4]) << ">\t";
+//	  cout << "<pr: " << u[0] << " vs " << v_r_ref(x[5]) << ">\t";
+	}
+//	dx[7] = 1-(1-w2)*r_status_coef[0]-w2*abs(s_diff);
+//	dx[7] = 1-(1-w2)*r_status_coef[0]*abs(u[0]-v_r_ref(x[5]))-w2*abs(s_diff);
+//	Trust
+
+	dx[8] = a_t*x[8]+b_t*x[7]+c_t*x[6];
+//update the human motion for next estimate
+	for (int j = num_n+1; j>0; j--)
+	{
+	    _xh[j] =_xh[j-1];
+	    _yh[j] =_yh[j-1];
+	}
+	_xh[1] = dx[0];
+	_yh[1] = dx[2];
+	for (int j = num_m+1; j>0; j--)
+	{
+	    _xh_dot[j] =_xh_dot[j-1];
+	    _yh_dot[j] =_yh_dot[j-1];
+	}
+	_xh_dot[1] = dx[1];
+	_yh_dot[1] = dx[3];
+	counter++;
+//	additional state for capturing the control input
+	dx[9]=x[10];
+	dx[10]=u[0];
+}
+
+double yane::I2R::TrustModel::continuousCostfunction(double t, double *x, double *u)
+{
+//	return ( 10.0*(x[5]-x[4])*(x[5]-x[4]) + 1.0*(u[0]-0)*(u[0]-0));
+//	return ( 10.0*(x[5]-.45)*(x[5]-.45) + 1.0*(u[0]-0)*(u[0]-0));
+//	cout << "contiuous u: " << u[0] << " s_r: " << x[5] << endl;
+//	return ( 10.0*(x[5]-2.65)*(x[5]-2.65) );
+	return ( 100.0*(x[5]-x[4])*(x[5]-x[4]) + 50.0*(u[0]-1)*(u[0]-1) + 10.0*(u[0]-x[9])*(u[0]-x[9]));
+//	return ( 10.0*(x[5]-x[4])*(x[5]-x[4]) +  10.0*(x[8]-1)*(x[8]-1) ) ;
+}
+
+void yane::I2R::TrustModel::restrictionFunction(double t, double *x, double *u, double *fx)
+{
+    float dv_max = 0.25;
+    fx[0] = dv_max - x[9] + u[0];
+    fx[1] = dv_max + x[9] - u[0];
+//    cout <<  fixed << setw(5) <<t<< ": " <<fixed << setw(10) <<  setprecision(2)<< u[0] <<setw(10) << x[9] <<setw(10) << fx[0] <<setw(10) << fx[1] <<endl;
+
+}
+
+double yane::I2R::TrustModel::discreteCostfunction(int length, int horizont, double *t, double *x, double *u)
+{
+//	return ( 100.0*(x[5]-x[4])*(x[5]-x[4]) + 20.0*(u[0]-1)*(u[0]-1) + 20.0*(u[0]-x[9])*(u[0]-x[9]));
+	return ( 100.0*(x[5]-x[4])*(x[5]-x[4]) + 20.0*(u[0]-1)*(u[0]-1) + 20.0*(u[0]-x[9])*(u[0]-x[9]));
+}
+
+void yane::I2R::TrustModel::getObjectiveWeight(double &weight_continuousCostfunction, double &weight_discreteCostfunction)
+{
+	weight_continuousCostfunction = 1.0;
+	weight_discreteCostfunction = 0.5;
+}
+
+void yane::I2R::TrustModel::getDefaultState(double *x)
+{
+	counter = 0;
+
+	for (int j=1; j<6; j++)
+	{
+	  _xh[j]=pos_i.x;
+	  _xh_dot[j]=pos_i.y;
+	  _yh[j]=0.0;
+	  _yh_dot[j]=0.0;
+	}
+	_sh = 0.0;
+	_xi=pos_i.x;
+	_yi=pos_i.y;
+	_sh0 = 0;
+	_dir_sgn = 1;
+	for (int j=1; j<10; j++)
+	{
+	  _tx[j]=0.0;
+	  _ty[j]=0.0;
+	}
+	x[0] = pos_i.x;
+	x[1] = 0.0;
+	x[2] = pos_i.y;
+	x[3] = 0.0;
+	x[4] = 0.0;
+	x[5] = 0.0;
+	x[6] = _ph;
+	x[7] = _pr;
+	x[8] = _trust;
+	x[9] =  0.5;
+	x[10] = 0.5;
+}
+
+void yane::I2R::TrustModel::getDefaultControl(double *u)
+{
+	u[0] = 0.0;
+}
+
+void yane::I2R::TrustModel::eventBeforeMPC(int horizont, double *t, double *x, double *sdatavalues)
+{
+//_xh[0] original data
+//_xh[1] updated data in ode_fuction
+	for (int j=0; j<7; j++)
+	{
+	  _xh[j] = _xh_org[j];	  _xh_dot[j] = _xh_dot_org[j];
+	  _yh[j] = _yh_org[j];	  _yh_dot[j] = _yh_dot_org[j];
+	}
+	_pr_data = _pr_data_org;
+	_ph_data = _ph_data_org;
+	x[0] = _xh[0];
+	x[1] = _xh_dot[0];
+	x[2] = _yh[0];
+	x[3] = _yh_dot[0];	
+	x[4] = _sh;	
+	x[5] = _sr;	//ok
+	x[6] = _ph;
+	x[7] = _pr;
+	x[8] = _trust;	//ok
+	x[9] = _u_pre;
+	x[10] = _u_pre;
+
+	// print the states
+//	cout <<  "  before MPC:   ";
+//	cout <<  "(";
+//	for ( int i = 4; i < 9; i++ )
+//	{
+//		cout << setprecision ( 2 ) << setw ( 6 ) << x[i] << " ";
+//	}
+//	cout <<  ") ";
+//	cout << endl; 
+	counter = 0;
+}
+
+void yane::I2R::TrustModel::updateTrustStates(double trust, vector<double> & pr_data, vector<double> & ph_data, double pr, double ph)
+{
+	_trust = trust;	
+	_pr = pr;
+	_ph = ph;
+	_pr_data_org = pr_data;
+	_ph_data_org = ph_data;
+}
+
+void yane::I2R::TrustModel::updateRobotStates(double sr, double status_r, double grad, double lr)
+{
+	_sr = sr;
+	if (abs(status_r-2)<epsilon) { 	//pick up
+	  r_status_coef[0]=0.0;
+	  r_status_coef[1]=0.5;
+	} else {			//motion
+	  r_status_coef[0]=1.0;
+	  r_status_coef[1]=0.0;
+	}
+	_grad = grad;
+	_lr = lr;
+}
+
+
+void yane::I2R::TrustModel::updateHumanStates(double x0, double x1, double x2, double x3, double x4, 
+						double xd0, double xd1, double xd2, double xd3, double xd4,
+						double y0, double y1, double y2, double y3,  double y4,
+						double yd0, double yd1, double yd2, double yd3, double yd4,
+						double sh0, double dir_sgn, 
+						double tx0, double tx1, double tx2, double tx3, double tx4, 
+						double tx5, double tx6, double tx7, double tx8, 
+						double ty0, double ty1, double ty2, double ty3, double ty4, 
+						double ty5, double ty6, double ty7, double ty8,
+						double sh, double xi, double yi)
+{
+	_xh_org[0]=x0;	_xh_org[1]=x0;	_xh_org[2]=x1;
+	_xh_org[3]=x2;	_xh_org[4]=x3;	_xh_org[5]=x4;
+	_xh_dot_org[0]=xd0;	_xh_dot_org[1]=xd0;	_xh_dot_org[2]=xd1;
+	_xh_dot_org[3]=xd2;	_xh_dot_org[4]=xd3;	_xh_dot_org[5]=xd4;
+	_yh_org[0]=y0;	_yh_org[1]=y0;	_yh_org[2]=y1;
+	_yh_org[3]=y2;	_yh_org[4]=y3;	_yh_org[5]=y4;
+	_yh_dot_org[0]=yd0;	_yh_dot_org[1]=yd0;	_yh_dot_org[2]=yd1;
+	_yh_dot_org[3]=yd2;	_yh_dot_org[4]=yd3;	_yh_dot_org[5]=yd4;
+	_sh = sh;
+	_xi = xi;
+	_yi = yi;
+	_sh0 = sh0;
+	_dir_sgn = dir_sgn;
+	_tx[1]=tx0;	_tx[2]=tx1;	_tx[3]=tx2;
+	_tx[4]=tx3;	_tx[5]=tx4;	_tx[6]=tx5;
+	_tx[7]=tx6;	_tx[8]=tx7;	_tx[9]=tx8;
+	_ty[1]=ty0;	_ty[2]=ty1;	_ty[3]=ty2;
+	_ty[4]=ty3;	_ty[5]=ty4;	_ty[6]=ty5;
+	_ty[7]=ty6;	_ty[8]=ty7;	_ty[9]=ty8;
+}
+void yane::I2R::TrustModel::updateControlStates(double &u)
+{
+    _u_pre = u;
+}
+
+void yane::I2R::TrustModel::getStates(i2r_tools::TrustMsg &msg)
+{
+    msg.x     = _xh[0];
+    msg.xdot  = _xh_dot[0];
+    msg.y     = _yh[0];
+    msg.ydot  = _yh_dot[0];
+    msg.sh    = _sh;
+    msg.sr    = _sr;
+    msg.ph    = _ph;
+    msg.pr    = _pr;
+    msg.trust = _trust;
+    msg.u     = _u_pre;
+
+    cout << fixed <<setw(6)<<setprecision(2)<< msg.sr    <<",";
+    cout << fixed <<setw(7)<<setprecision(2)<< msg.sh    <<",";
+    cout << fixed <<setw(7)<<setprecision(2)<< msg.u     <<",";
+    cout << fixed <<setw(7)<<setprecision(2)<< msg.pr    <<",";
+    cout << fixed <<setw(7)<<setprecision(2)<< msg.ph    <<",";
+    cout << fixed <<setw(7)<<setprecision(2)<< msg.trust <<",";
+}
+
+const yane::Utils::Uuid & yane::I2R::TrustModel::id()
+{
+	return ID;
+}
+
+double yane::I2R::TrustModel::v_r_ref(double s_r)
+{
+	return s_ref(fmod(s_r, 1));
+//	if (s_r>.25) {return 2*(.5-s_r);} 
+//	else {return 2*s_r;}
+}
+
+double yane::I2R::TrustModel::v_h_ref(double s_h)
+{
+	return s_ref(fmod(s_h, 1));
+//	if (s_h>.25) {return 2*(.5-s_h);}
+//	else {return 2*s_h;}
+}

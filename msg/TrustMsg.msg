@@ -1,0 +1,10 @@
+float64 x
+float64 xdot
+float64 y
+float64 ydot
+float64 sh
+float64 sr
+float64 ph
+float64 pr
+float64 trust
+float64 u

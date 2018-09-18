@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<launch>
+  <param name="Q" value="100.0" type="double"/>
+  <param name="W" value="50.0" type="double"/>
+  <param name="R" value="50.0" type="double"/>
+  <!--<param name="Z" value="50.0" type="double"/>-->
+  <param name="Z" value="50.0" type="double"/>
+  <param name="du_max" value= ".2" type="double"/>
+  <arg name="log" default="S_XX" />
+  <node name="phasespace" pkg="phase_space_node" type="phasespacenode_bax"/>
+  <node name="tracker"    pkg="i2r_tools" type="tracker_glove">
+    <param name="led_name" value="/LED24" />
+  </node>
+  <node name="trust"      pkg="i2r_tools" type="trust_sim.py">
+    <param name="log_file" value="$(arg log)_test_tracking.csv"/>
+  </node>
+  <node name="solver"     pkg="i2r_tools" type="solver_integrated"/>
+  <node name="change_speed"      pkg="i2r_tools" type="change_speed.py"/>
+  <node name="transparency"     pkg="i2r_tools" type="monitor_trust.py">
+    <param name="trust_show" value="True"/>
+    <param name="emotion" value="False"/>
+    <param name="log_file" value="$(arg log).txt"/>
+  </node>
+</launch>

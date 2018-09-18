@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<launch>
+  <node name="phasespace" pkg="phase_space_node" type="phasespacenode"/>
+  <node name="tracker"    pkg="i2r_tools" type="tracker_glove">
+    <param name="led_name" value="/LED8" />
+  </node>
+  <node name="recorder"     pkg="i2r_tools" type="recorder_1.py" />
+  <node name="player"     pkg="i2r_tools" type="exp_tase_demo.py" />
+  <node name="transparency"     pkg="i2r_tools" type="monitor_trust_demo.py">
+    <param name="extra_trust_show" value="False"/>
+    <param name="trust_show" value="True"/>
+    <param name="emotion" value="True"/>
+    <param name="log_file" value="demo.txt"/>
+  </node>
+
+</launch>

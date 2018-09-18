@@ -1,0 +1,111 @@
+#!/usr/bin/env python
+__author__ = 'behzad'
+import sys
+import threading
+from bisect import bisect
+from copy import copy
+from os import path
+import actionlib
+from control_msgs.msg import (
+    FollowJointTrajectoryAction,
+    FollowJointTrajectoryGoal,
+)
+from trajectory_msgs.msg import (
+    JointTrajectoryPoint,
+)
+import argparse
+import operator
+import numpy as np
+import csv
+import baxter_pykdl
+from math import atan, asin
+from std_msgs.msg import (
+    UInt16,
+    Float64,
+    UInt8,
+    Bool,
+)
+from geometry_msgs.msg import (
+    Vector3
+)
+import rospy
+import baxter_interface
+import baxter_external_devices
+from baxter_interface import CHECK_VERSION
+import matplotlib.pyplot as plt
+import random
+import i2r.color as i2rcv
+import i2r.camera as i2rcamera
+import tf
+from cv_bridge import CvBridge, CvBridgeError
+from sensor_msgs.msg import Image
+import cv2
+from i2r_move.msg import (
+    TrustData,
+    RobotData,
+    Human
+)
+import player
+
+
+def main():
+    """Experiment - Preliminary - Effective Case
+    """
+    epilog = """
+    Related examples:
+    exp_preliminary_pol.py.
+    """
+    arg_fmt = argparse.RawDescriptionHelpFormatter
+    parser = argparse.ArgumentParser(formatter_class=arg_fmt,
+                                     description=main.__doc__,
+                                     epilog=epilog)
+    required = parser.add_argument_group('required arguments')
+    parser.add_argument(
+        '-r', '--command_rate', type=int, default=100, metavar='COMRATE',
+        help='rate at which to send commands (default: 100)'
+    )
+    parser.add_argument(
+        '-p', '--polite', type=int, default=True, metavar='POLITE',
+        help='Enables the polite behavior of the robot (default: False)'
+    )
+    args = parser.parse_args(rospy.myargv()[1:])
+    print("Initializing node... ")
+    rospy.init_node("effective_exp")
+    print("Getting robot state... ")
+    rs = baxter_interface.RobotEnable(CHECK_VERSION)
+    print("Enabling robot... ")
+    rs.enable()
+    polite = args.polite
+    # polite=False #case 1
+    # polite=True #case 2
+
+    if polite:
+        filenames = ['p3_t1'] # and p2_t9 and p2_t10
+    else:
+        filenames = ['p1_t1',]
+    path_dir = '/home/baxter/ros_ws/src/i2r_tools/scripts/finishing_task/'
+    mover = player.PosPlayer(path_dir+filenames[0]+'.csv', args.command_rate)
+    rospy.on_shutdown(mover.stop)
+
+    print("Moving. Press Ctrl-C to stop.")
+    mover.set_image('/home/baxter/ros_ws/src/i2r_move/img/idle.png')
+
+    debug = True
+    # debug = False
+    for index, entry in enumerate(filenames):
+        rospy.loginfo(entry)
+        mover.open_file(path_dir+entry+'.csv')
+        mover.force_velocity(1.0)
+        if debug:
+            for i, tmp in enumerate(entry):
+                rospy.loginfo("point~"+str(i+1))
+                mover.move_waypoint(i+1)
+                mover.wait("wait for "+str(i+1))
+        else:
+            mover.move_joint_fast()
+
+    mover.move_to_pos(mover._joint_first, timeout=15)
+    rospy.loginfo("\nDone.")
+
+if __name__ == '__main__':
+    main()

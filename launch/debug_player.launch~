@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<launch>
+  <node name="phasespace" pkg="phase_space_node" type="phasespacenode_bax"/>
+  <node name="tracker"    pkg="i2r_tools" type="tracker_glove">
+    <param name="led_name" value="/LED9" />
+  </node>
+  <node name="player"     pkg="i2r_tools" type="exp_tase_1.py" />
+</launch>

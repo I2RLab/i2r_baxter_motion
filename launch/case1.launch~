@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="log" default="S_XX" />
+  <node name="phasespace" pkg="phase_space_node" type="phasespacenode_bax"/>
+  <node name="tracker"    pkg="i2r_tools" type="tracker_glove">
+    <param name="led_name" value="/LED9" />
+  </node>
+  <node name="baxter"     pkg="i2r_tools" type="exp_tase_1.py">
+    <param name="emotion" value="False"/>
+    <param name="trust_path" value="False" />
+  </node>
+  <node name="trust"      pkg="i2r_tools" type="trust_sim.py">
+    <param name="log_file" value="$(arg log)_case1.csv"/>
+  </node>
+  <node name="change_speed"      pkg="i2r_tools" type="change_speed.py"/>
+  <node name="transparency"     pkg="i2r_tools" type="monitor_trust.py">
+    <param name="emotion" value="False"/>
+    <param name="trust_show" value="False"/>
+    <param name="log_file" value="$(arg log).txt"/>
+  </node>
+
+</launch>
